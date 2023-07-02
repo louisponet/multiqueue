@@ -279,7 +279,6 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
 
     pub fn try_send_multi(&self, val: T) -> Result<(), TrySendError<T>> {
         let mut transaction = self.head.load_transaction(Relaxed);
-
         unsafe {
             loop {
                 let (chead, wrap_valid_tag) = transaction.get();
@@ -287,13 +286,13 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                 if transaction.matches_previous(tail_cache) {
                     let new_tail = self.reload_tail_multi(tail_cache, wrap_valid_tag);
                     if transaction.matches_previous(new_tail) {
-                        return Err(TrySendError::Full(val));
+                        // return Err(TrySendError::Full(val));
                     }
                 }
                 let write_cell = &mut *self.data.offset(chead);
                 let ref_cell = &*self.refs.offset(chead);
                 if !RW::check_ref(&ref_cell.refcnt) {
-                    return Err(TrySendError::Full(val));
+                    // return Err(TrySendError::Full(val));
                 }
                 fence(Acquire);
 
@@ -329,13 +328,13 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
             if transaction.matches_previous(tail_cache) {
                 let new_tail = self.reload_tail_single(wrap_valid_tag);
                 if transaction.matches_previous(new_tail) {
-                    return Err(TrySendError::Full(val));
+                    // return Err(TrySendError::Full(val));
                 }
             }
             let write_cell = &mut *self.data.offset(chead);
             let ref_cell = &*self.refs.offset(chead);
             if !RW::check_ref(&ref_cell.refcnt) {
-                return Err(TrySendError::Full(val));
+                // return Err(TrySendError::Full(val));
             }
             fence(Acquire);
             transaction.commit_direct(1, Relaxed);
@@ -345,6 +344,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
             } else {
                 None
             };
+            // println!("head {chead:?}, wrap valid {wrap_valid_tag:?}");
             ptr::write(&mut write_cell.val, val);
             write_cell.wraps.store(wrap_valid_tag, Release);
             Ok(())
@@ -357,6 +357,7 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
         unsafe {
             loop {
                 let (ctail, wrap_valid_tag) = ctail_attempt.get();
+                // println!("tail {ctail:?}, wrap valid {wrap_valid_tag:?}");
                 let read_cell = &mut *self.data.offset(ctail);
 
                 // For any curious readers, this gnarly if block catchs a race between
@@ -366,16 +367,20 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                 // after the writer load so ensure that the the wrap_valid_tag is still wrong so
                 // we had actually seen a race. Doing it this way removes fences on the fast path
                 let seen_tag = read_cell.wraps.load(DepOrd);
-                if rm_tag(seen_tag) != wrap_valid_tag {
+                // println!("seen {seen_tag:?}");
+                // println!("rm_tag {:?}", rm_tag(seen_tag));
+                if rm_tag(seen_tag) < wrap_valid_tag {
                     if self.writers.load(Relaxed) == 0 {
                         fence(Acquire);
                         if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
                             return Err((ptr::null(), TryRecvError::Disconnected));
                         }
                     }
+                    // println!("empty");
                     return Err((&read_cell.wraps, TryRecvError::Empty));
                 }
                 let ref_cell = &*self.refs.offset(ctail);
+
                 if !is_single {
                     RW::inc_ref(&ref_cell.refcnt);
                     if reader.load_count(Relaxed) != wrap_valid_tag {
@@ -384,12 +389,14 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                         continue;
                     }
                 }
+
                 let rval = dependently_mut(seen_tag, &mut read_cell.val, |rc| RW::get_val(rc));
                 fence(Release);
                 if !is_single {
                     RW::dec_ref(&ref_cell.refcnt);
                 }
-                match ctail_attempt.commit_attempt(1, Relaxed) {
+                // println!("by {}", (seen_tag - wrap_valid_tag +1 ) as u64);
+                match ctail_attempt.commit_attempt((seen_tag - wrap_valid_tag +1 ) as u64, Relaxed) {
                     Some(new_attempt) => {
                         ctail_attempt = new_attempt;
                         RW::forget_val(rval);
@@ -510,7 +517,7 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
         self.examine_signals();
         match self.queue.try_recv(&self.reader) {
             Ok(v) => Ok(v),
-            Err((_, e)) => Err(e),
+            Err((e1, e)) => Err(e),
         }
     }
 
