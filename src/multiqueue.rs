@@ -368,15 +368,15 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
                 // we had actually seen a race. Doing it this way removes fences on the fast path
                 let seen_tag = read_cell.wraps.load(DepOrd);
                 // println!("seen {seen_tag:?}");
+                // println!("wrap valid {wrap_valid_tag:?}");
                 // println!("rm_tag {:?}", rm_tag(seen_tag));
-                if rm_tag(seen_tag) < wrap_valid_tag {
+                if rm_tag(seen_tag) < wrap_valid_tag || seen_tag == INITIAL_QUEUE_FLAG {
                     if self.writers.load(Relaxed) == 0 {
                         fence(Acquire);
                         if rm_tag(read_cell.wraps.load(Acquire)) != wrap_valid_tag {
                             return Err((ptr::null(), TryRecvError::Disconnected));
                         }
                     }
-                    // println!("empty");
                     return Err((&read_cell.wraps, TryRecvError::Empty));
                 }
                 let ref_cell = &*self.refs.offset(ctail);
@@ -464,16 +464,16 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
 impl<RW: QueueRW<T>, T> InnerSend<RW, T> {
     #[inline(always)]
     pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
-        let signal = self.queue
-            .manager
-            .signal
-            .load(Relaxed);
-        if signal.has_action() {
-            let disconnected = self.handle_signals(signal);
-            if disconnected {
-                return Err(TrySendError::Full(val));
-            }
-        }
+        // let signal = self.queue
+        //     .manager
+        //     .signal
+        //     .load(Relaxed);
+        // if signal.has_action() {
+        //     let disconnected = self.handle_signals(signal);
+        //     if disconnected {
+        //         return Err(TrySendError::Full(val));
+        //     }
+        // }
         let val = match self.state.get() {
             QueueState::Uni => self.queue.try_send_single(val),
             QueueState::Multi => {
