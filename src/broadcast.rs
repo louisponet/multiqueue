@@ -1,6 +1,7 @@
 use countedindex::Index;
 use multiqueue::{InnerSend, InnerRecv, FutInnerSend, FutInnerRecv, FutInnerUniRecv, BCast,
                  MultiQueue, SendError, futures_multiqueue};
+use overwriting_queue::{OverwritingInnerSend, OverwritingInnerRecv, OverwritingQueue};
 use wait::Wait;
 
 use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
@@ -824,6 +825,229 @@ impl<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> Iterator for BroadcastUniRe
     }
 }
 
+// Overwriting
+
+
+#[derive(Clone)]
+pub struct OverwritingBroadcastSender<T: Clone> {
+    sender: OverwritingInnerSend<BCast<T>, T>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OverwritingBroadcastReceiver<T: Clone> {
+    receiver: OverwritingInnerRecv<BCast<T>, T>,
+}
+pub struct OverwritingBroadcastUniReceiver<T: Clone + Sync> {
+    receiver: OverwritingInnerRecv<BCast<T>, T>,
+}
+
+impl<T: Clone> OverwritingBroadcastSender<T> {
+    #[inline(always)]
+    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
+        self.sender.try_send(val)
+    }
+
+    /// Removes the writer from the queue
+    pub fn unsubscribe(self) {
+        self.sender.unsubscribe();
+    }
+}
+
+impl<T: Clone> OverwritingBroadcastReceiver<T> {
+    #[inline(always)]
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.receiver.try_recv()
+    }
+    #[inline(always)]
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.receiver.recv()
+    }
+    pub fn add_stream(&self) -> OverwritingBroadcastReceiver<T> {
+        OverwritingBroadcastReceiver { receiver: self.receiver.add_stream() }
+    }
+    pub fn unsubscribe(self) -> bool {
+        self.receiver.unsubscribe()
+    }
+}
+
+impl<T: Clone + Sync> OverwritingBroadcastReceiver<T> {
+    pub fn into_single(self) -> Result<OverwritingBroadcastUniReceiver<T>, OverwritingBroadcastReceiver<T>> {
+        if self.receiver.is_single() {
+            Ok(OverwritingBroadcastUniReceiver { receiver: self.receiver })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl<T: Clone + Sync> OverwritingBroadcastUniReceiver<T> {
+    /// Identical to ```OverwritingBroadcastReceiver::try_recv```
+    #[inline(always)]
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    /// Identical to ```OverwritingBroadcastReceiver::recv```
+    #[inline(always)]
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.receiver.recv()
+    }
+    #[inline(always)]
+    pub fn try_recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, TryRecvError)> {
+        self.receiver.try_recv_view(op)
+    }
+    #[inline(always)]
+    pub fn recv_view<R, F: FnOnce(&T) -> R>(&self, op: F) -> Result<R, (F, RecvError)> {
+        self.receiver.recv_view(op)
+    }
+    pub fn unsubscribe(self) {
+        self.receiver.unsubscribe();
+    }
+    pub fn into_multi(self) -> OverwritingBroadcastReceiver<T> {
+        OverwritingBroadcastReceiver { receiver: self.receiver }
+    }
+}
+pub struct OverwritingBroadcastIter<T: Clone> {
+    recv: OverwritingBroadcastReceiver<T>,
+}
+
+impl<T: Clone> Iterator for OverwritingBroadcastIter<T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<T> {
+        match self.recv.recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<T: Clone> IntoIterator for OverwritingBroadcastReceiver<T> {
+    type Item = T;
+
+    type IntoIter = OverwritingBroadcastIter<T>;
+
+    fn into_iter(self) -> OverwritingBroadcastIter<T> {
+        OverwritingBroadcastIter { recv: self }
+    }
+}
+
+pub struct OverwritingBroadcastSCIter<T: Clone + Sync> {
+    recv: OverwritingBroadcastUniReceiver<T>,
+}
+
+impl<T: Clone + Sync> Iterator for OverwritingBroadcastSCIter<T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<T> {
+        match self.recv.recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<T: Clone + Sync> IntoIterator for OverwritingBroadcastUniReceiver<T> {
+    type Item = T;
+
+    type IntoIter = OverwritingBroadcastSCIter<T>;
+
+    fn into_iter(self) -> OverwritingBroadcastSCIter<T> {
+        OverwritingBroadcastSCIter { recv: self }
+    }
+}
+
+
+pub struct OverwritingBroadcastRefIter<'a, T: Clone + 'a> {
+    recv: &'a OverwritingBroadcastReceiver<T>,
+}
+
+impl<'a, T: Clone + 'a> Iterator for OverwritingBroadcastRefIter<'a, T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<T> {
+        match self.recv.try_recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<'a, T: Clone + 'a> IntoIterator for &'a OverwritingBroadcastReceiver<T> {
+    type Item = T;
+
+    type IntoIter = OverwritingBroadcastRefIter<'a, T>;
+
+    fn into_iter(self) -> OverwritingBroadcastRefIter<'a, T> {
+        OverwritingBroadcastRefIter { recv: self }
+    }
+}
+
+pub struct OverwritingBroadcastSCRefIter<'a, T: Clone + Sync + 'a> {
+    recv: &'a OverwritingBroadcastUniReceiver<T>,
+}
+
+impl<'a, T: Clone + Sync + 'a> Iterator for OverwritingBroadcastSCRefIter<'a, T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<T> {
+        match self.recv.try_recv() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<'a, T: Clone + Sync + 'a> IntoIterator for &'a OverwritingBroadcastUniReceiver<T> {
+    type Item = T;
+
+    type IntoIter = OverwritingBroadcastSCRefIter<'a, T>;
+
+    fn into_iter(self) -> OverwritingBroadcastSCRefIter<'a, T> {
+        OverwritingBroadcastSCRefIter { recv: self }
+    }
+}
+
+
+pub struct OverwritingBroadcastUniIter<R, F: FnMut(&T) -> R, T: Clone + Sync> {
+    recv: OverwritingBroadcastUniReceiver<T>,
+    op: F,
+}
+
+impl<R, F: FnMut(&T) -> R, T: Clone + Sync> Iterator for OverwritingBroadcastUniIter<R, F, T> {
+    type Item = R;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<R> {
+        let opref = &mut self.op;
+        match self.recv.recv_view(|v| opref(v)) {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
+
+pub struct OverwritingBroadcastUniRefIter<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> {
+    recv: &'a OverwritingBroadcastUniReceiver<T>,
+    op: F,
+}
+
+impl<'a, R, F: FnMut(&T) -> R, T: Clone + Sync + 'a> Iterator for OverwritingBroadcastUniRefIter<'a, R, F, T> {
+    type Item = R;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<R> {
+        let opref = &mut self.op;
+        match self.recv.try_recv_view(|v| opref(v)) {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
+}
 /// Creates a (```BroadcastSender```, ```BroadcastReceiver```) pair with a capacity that's
 /// the next power of two >= the given capacity
 ///
@@ -870,6 +1094,22 @@ pub fn broadcast_fut_queue<T: Clone>(capacity: Index)
 unsafe impl<T: Send + Sync + Clone> Send for BroadcastSender<T> {}
 unsafe impl<T: Send + Sync + Clone> Send for BroadcastReceiver<T> {}
 unsafe impl<T: Send + Sync + Clone> Send for BroadcastUniReceiver<T> {}
+
+//Overwriting
+pub fn overwriting_broadcast_queue<T: Clone>(capacity: Index) -> (OverwritingBroadcastSender<T>, OverwritingBroadcastReceiver<T>) {
+    let (send, recv) = OverwritingQueue::<BCast<T>, T>::new(capacity);
+    (OverwritingBroadcastSender { sender: send }, OverwritingBroadcastReceiver { receiver: recv })
+}
+pub fn overwriting_broadcast_queue_with<T: Clone, W: Wait + 'static>
+    (capacity: Index,
+     wait: W)
+     -> (OverwritingBroadcastSender<T>, OverwritingBroadcastReceiver<T>) {
+    let (send, recv) = OverwritingQueue::<BCast<T>, T>::new_with(capacity, wait);
+    (OverwritingBroadcastSender { sender: send }, OverwritingBroadcastReceiver { receiver: recv })
+}
+unsafe impl<T: Send + Sync + Clone> Send for OverwritingBroadcastSender<T> {}
+unsafe impl<T: Send + Sync + Clone> Send for OverwritingBroadcastReceiver<T> {}
+unsafe impl<T: Send + Sync + Clone> Send for OverwritingBroadcastUniReceiver<T> {}
 
 #[cfg(test)]
 mod test {
