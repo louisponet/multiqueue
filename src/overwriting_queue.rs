@@ -1,7 +1,6 @@
 use std::cell::Cell;
 use std::fmt;
 use std::marker::PhantomData;
-use std::mem;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, fence};
@@ -58,7 +57,7 @@ pub struct OverwritingQueue<RW: QueueRW<T>, T> {
     data: *mut QueueEntry<T>,
     refs: *mut RefCnt,
     capacity: isize,
-    pub waiter: Arc<Wait>,
+    pub waiter: Arc<dyn Wait>,
     needs_notify: bool,
     mk: PhantomData<RW>,
     d3: [u8; 64],
@@ -91,10 +90,10 @@ impl<RW: QueueRW<T>, T> OverwritingQueue<RW, T> {
         OverwritingQueue::new_internal(capacity, Arc::new(wait))
     }
 
-    fn new_internal(_capacity: Index, wait: Arc<Wait>) -> (OverwritingInnerSend<RW, T>, OverwritingInnerRecv<RW, T>) {
+    fn new_internal(_capacity: Index, wait: Arc<dyn Wait>) -> (OverwritingInnerSend<RW, T>, OverwritingInnerRecv<RW, T>) {
         let capacity = get_valid_wrap(_capacity);
-        let queuedat = alloc::allocate(capacity as usize);
-        let refdat = alloc::allocate(capacity as usize);
+        let queuedat: *mut QueueEntry<T> = alloc::allocate(capacity as usize);
+        let refdat: *mut RefCnt = alloc::allocate(capacity as usize);
         unsafe {
             for i in 0..capacity as isize {
                 let elem: &QueueEntry<T> = &*queuedat.offset(i);
@@ -108,12 +107,12 @@ impl<RW: QueueRW<T>, T> OverwritingQueue<RW, T> {
         let (cursor, reader) = ReadCursor::new(capacity);
         let needs_notify = wait.needs_notify();
         let queue = OverwritingQueue {
-            d1: unsafe { mem::uninitialized() },
+            d1: [0; 64],
 
             head: CountedIndex::new(capacity),
             tail_cache: AtomicUsize::new(0),
             writers: AtomicUsize::new(1),
-            d2: unsafe { mem::uninitialized() },
+            d2: [0; 64],
 
             tail: cursor,
             data: queuedat,
@@ -122,11 +121,11 @@ impl<RW: QueueRW<T>, T> OverwritingQueue<RW, T> {
             waiter: wait,
             needs_notify: needs_notify,
             mk: PhantomData,
-            d3: unsafe { mem::uninitialized() },
+            d3: [0; 64],
 
             manager: MemoryManager::new(),
 
-            d4: unsafe { mem::uninitialized() },
+            d4: [0; 64],
         };
 
         let qarc = Arc::new(queue);
@@ -377,7 +376,7 @@ impl<RW: QueueRW<T>, T> OverwritingInnerRecv<RW, T> {
         self.examine_signals();
         match self.queue.try_recv(&self.reader) {
             Ok(v) => Ok(v),
-            Err((e1, e)) => Err(e),
+            Err((_, e)) => Err(e),
         }
     }
 

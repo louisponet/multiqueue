@@ -40,7 +40,7 @@ pub trait Wait {
     /// Causes the reader to block until the queue is available. Is passed
     /// the queue tag which the readers are waiting on, a reference to the
     /// corresponding AtomicUsize, and a reference to the number of writers
-    fn wait(&self, usize, &AtomicUsize, &AtomicUsize);
+    fn wait(&self, _: usize, _: &AtomicUsize, _: &AtomicUsize);
 
     /// Called by writers to awaken waiting readers
     fn notify(&self);

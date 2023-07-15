@@ -8,7 +8,7 @@ mod index_data {
     // 03th and 31 bit are available
     pub const MAX_WRAP: Index = (1 << 30) - 1;
 
-    pub const MASK_IND: Index = (1 << 31);
+    pub const MASK_IND: Index = 1 << 31;
 
 }
 
@@ -20,7 +20,7 @@ mod index_data {
     /// 2 less than the highest bits
     pub const MAX_WRAP: Index = (1 << 62) - 1;
 
-    pub const MASK_IND: Index = (1 << 63);
+    pub const MASK_IND: Index = 1 << 63;
 }
 
 pub type Index = index_data::Index;

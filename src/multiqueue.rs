@@ -27,20 +27,20 @@ extern crate parking_lot;
 extern crate smallvec;
 
 use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
-use self::futures::task::{park, Task};
+use self::futures::task::{current, Task};
 
 use self::atomic_utilities::artificial_dep::{dependently_mut, DepOrd};
 
 /// This is basically acting as a static bool
 /// so the queue can act as a normal mpmc in other circumstances
 pub trait QueueRW<T> {
-    fn inc_ref(&AtomicUsize);
-    fn dec_ref(&AtomicUsize);
-    fn check_ref(&AtomicUsize) -> bool;
+    fn inc_ref(_: &AtomicUsize);
+    fn dec_ref(_: &AtomicUsize);
+    fn check_ref(_: &AtomicUsize) -> bool;
     fn do_drop() -> bool;
-    unsafe fn get_val(&mut T) -> T;
-    fn forget_val(T);
-    unsafe fn drop_in_place(&mut T);
+    unsafe fn get_val(_: &mut T) -> T;
+    fn forget_val(_: T);
+    unsafe fn drop_in_place(_: &mut T);
 }
 
 #[derive(Clone)]
@@ -161,7 +161,7 @@ pub struct MultiQueue<RW: QueueRW<T>, T> {
     data: *mut QueueEntry<T>,
     refs: *mut RefCnt,
     capacity: isize,
-    pub waiter: Arc<Wait>,
+    pub waiter: Arc<dyn Wait>,
     needs_notify: bool,
     mk: PhantomData<RW>,
     d3: [u8; 64],
@@ -221,10 +221,10 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
         MultiQueue::new_internal(capacity, Arc::new(wait))
     }
 
-    fn new_internal(_capacity: Index, wait: Arc<Wait>) -> (InnerSend<RW, T>, InnerRecv<RW, T>) {
+    fn new_internal(_capacity: Index, wait: Arc<dyn Wait>) -> (InnerSend<RW, T>, InnerRecv<RW, T>) {
         let capacity = get_valid_wrap(_capacity);
-        let queuedat = alloc::allocate(capacity as usize);
-        let refdat = alloc::allocate(capacity as usize);
+        let queuedat: *mut QueueEntry<T> = alloc::allocate(capacity as usize);
+        let refdat: *mut RefCnt = alloc::allocate(capacity as usize);
         unsafe {
             for i in 0..capacity as isize {
                 let elem: &QueueEntry<T> = &*queuedat.offset(i);
@@ -238,12 +238,12 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
         let (cursor, reader) = ReadCursor::new(capacity);
         let needs_notify = wait.needs_notify();
         let queue = MultiQueue {
-            d1: unsafe { mem::uninitialized() },
+            d1: [0;64],
 
             head: CountedIndex::new(capacity),
             tail_cache: AtomicUsize::new(0),
             writers: AtomicUsize::new(1),
-            d2: unsafe { mem::uninitialized() },
+            d2: [0;64],
 
             tail: cursor,
             data: queuedat,
@@ -252,11 +252,11 @@ impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
             waiter: wait,
             needs_notify: needs_notify,
             mk: PhantomData,
-            d3: unsafe { mem::uninitialized() },
+            d3: [0;64],
 
             manager: MemoryManager::new(),
 
-            d4: unsafe { mem::uninitialized() },
+            d4: [0;64],
         };
 
         let qarc = Arc::new(queue);
@@ -890,7 +890,7 @@ impl FutWait {
         if check(seq, at, wc) {
             return false;
         }
-        parked.push_back(park());
+        parked.push_back(current());
         return true;
     }
 
@@ -916,7 +916,7 @@ impl FutWait {
         let mut parked = self.parked.lock();
         match f(val) {
             Err(TrySendError::Full(v)) => {
-                parked.push_back(park());
+                parked.push_back(current());
                 return Err(TrySendError::Full(v));
             }
             v => return v,
@@ -926,7 +926,7 @@ impl FutWait {
     fn notify_all(&self) {
         let mut parked = self.parked.lock();
         for val in parked.drain(..) {
-            val.unpark();
+            val.notify();
         }
     }
 }
@@ -942,14 +942,14 @@ impl Wait for FutWait {
         if parked.len() > 0 {
             if parked.len() > 8 {
                 for val in parked.drain(..) {
-                    val.unpark();
+                    val.notify();
                 }
             } else {
                 let mut inline_v = smallvec::SmallVec::<[Task; 9]>::new();
                 inline_v.extend(parked.drain(..));
                 drop(parked);
                 for val in inline_v.drain() {
-                    val.unpark();
+                    val.notify();
                 }
             }
         }
