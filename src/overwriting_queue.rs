@@ -360,14 +360,6 @@ impl<RW: QueueRW<T>, T> OverwritingInnerSend<RW, T> {
 
     /// Removes the writer as a producer to the queue
     pub fn unsubscribe(self) {}
-
-    #[cold]
-    fn handle_signals(&self, signal: LoadedSignal) -> bool {
-        if signal.get_epoch() {
-            self.queue.manager.update_token(self.token);
-        }
-        signal.get_reader()
-    }
 }
 
 impl<RW: QueueRW<T>, T> OverwritingInnerRecv<RW, T> {
