@@ -316,9 +316,8 @@ mod broadcast;
 mod read_cursor;
 pub mod wait;
 
-pub use broadcast::{BroadcastSender, BroadcastReceiver, BroadcastUniReceiver, BroadcastFutSender,
-                    BroadcastFutReceiver, BroadcastFutUniReceiver, broadcast_queue,OverwritingBroadcastSender, OverwritingBroadcastReceiver, OverwritingBroadcastUniReceiver,
-                    broadcast_queue_with, broadcast_fut_queue, overwriting_broadcast_queue, overwriting_broadcast_queue_with,};
+pub use broadcast::{BroadcastSender, BroadcastReceiver, BroadcastUniReceiver, 
+                    broadcast_queue,OverwritingBroadcastSender, OverwritingBroadcastReceiver, OverwritingBroadcastUniReceiver,
+                    broadcast_queue_with, overwriting_broadcast_queue, overwriting_broadcast_queue_with,};
 
-pub use mpmc::{MPMCSender, MPMCReceiver, MPMCUniReceiver, MPMCFutSender, MPMCFutReceiver,
-               MPMCFutUniReceiver, mpmc_queue, mpmc_queue_with, mpmc_fut_queue};
+pub use mpmc::{MPMCSender, MPMCReceiver, MPMCUniReceiver,mpmc_queue, mpmc_queue_with};

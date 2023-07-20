@@ -16,8 +16,6 @@ use wait::*;
 use read_cursor::{ReadCursor, Reader};
 
 extern crate atomic_utilities;
-extern crate futures;
-extern crate parking_lot;
 extern crate smallvec;
 use self::atomic_utilities::artificial_dep::{dependently_mut, DepOrd};
 use super::multiqueue::{QueueRW, QueueState};

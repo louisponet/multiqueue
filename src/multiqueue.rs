@@ -1,7 +1,6 @@
 
 use std::any::Any;
 use std::cell::Cell;
-use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
@@ -11,7 +10,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, fence};
 use std::sync::atomic::Ordering::*;
 use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};
-use std::thread::yield_now;
 
 use alloc;
 use atomicsignal::LoadedSignal;
@@ -22,12 +20,7 @@ use wait::*;
 use read_cursor::{ReadCursor, Reader};
 
 extern crate atomic_utilities;
-extern crate futures;
-extern crate parking_lot;
 extern crate smallvec;
-
-use self::futures::{Async, AsyncSink, Poll, Sink, Stream, StartSend};
-use self::futures::task::{current, Task};
 
 use self::atomic_utilities::artificial_dep::{dependently_mut, DepOrd};
 
@@ -184,31 +177,6 @@ pub struct InnerRecv<RW: QueueRW<T>, T> {
 }
 
 /// This is a sender that can transparently act as a futures stream
-pub struct FutInnerSend<RW: QueueRW<T>, T> {
-    writer: InnerSend<RW, T>,
-    wait: Arc<FutWait>,
-    prod_wait: Arc<FutWait>,
-}
-
-/// This is a receiver that can transparently act as a futures stream
-pub struct FutInnerRecv<RW: QueueRW<T>, T> {
-    reader: InnerRecv<RW, T>,
-    wait: Arc<FutWait>,
-    prod_wait: Arc<FutWait>,
-}
-
-pub struct FutInnerUniRecv<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> {
-    reader: InnerRecv<RW, T>,
-    wait: Arc<FutWait>,
-    prod_wait: Arc<FutWait>,
-    pub op: F,
-}
-
-struct FutWait {
-    spins_first: usize,
-    spins_yield: usize,
-    parked: parking_lot::Mutex<VecDeque<Task>>,
-}
 
 impl<RW: QueueRW<T>, T> MultiQueue<RW, T> {
     pub fn new(_capacity: Index) -> (InnerSend<RW, T>, InnerRecv<RW, T>) {
@@ -612,127 +580,6 @@ impl<RW: QueueRW<T>, T> InnerRecv<RW, T> {
 }
 
 
-impl<RW: QueueRW<T>, T> FutInnerSend<RW, T> {
-    /// Identical to InnerSend::try_send()
-    pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
-        self.writer.try_send(val)
-    }
-
-    /// Identical to InnerSend::unsubscribe()
-    pub fn unsubscribe(self) {
-        self.writer.unsubscribe()
-    }
-}
-
-impl<RW: QueueRW<T>, T> FutInnerRecv<RW, T> {
-    /// Identical to InnerRecv::try_recv()
-    #[inline(always)]
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.reader.try_recv()
-    }
-
-    #[inline(always)]
-    pub fn recv(&self) -> Result<T, RecvError> {
-        self.reader.recv()
-    }
-
-    /// Creates a new stream and returns a FutInnerRecv on that stream
-    pub fn add_stream(&self) -> FutInnerRecv<RW, T> {
-        let rx = self.reader.add_stream();
-        FutInnerRecv {
-            reader: rx,
-            wait: self.wait.clone(),
-            prod_wait: self.prod_wait.clone(),
-        }
-    }
-
-    /// Attempts to transform this receiver into a FutInnerUniRecv
-    /// calling the passed function on the input data.
-    pub fn into_single<R, F: FnMut(&T) -> R>
-        (self,
-         op: F)
-         -> Result<FutInnerUniRecv<RW, R, F, T>, (F, FutInnerRecv<RW, T>)> {
-        let new_mreader;
-        let new_pwait = self.prod_wait.clone();
-        let new_wait = self.wait.clone();
-        {
-            new_mreader = self.reader.clone();
-            drop(self);
-        }
-        if new_mreader.is_single() {
-            Ok(FutInnerUniRecv {
-                   reader: new_mreader,
-                   wait: new_wait,
-                   prod_wait: new_pwait,
-                   op: op,
-               })
-        } else {
-            Err((op,
-                 FutInnerRecv {
-                     reader: new_mreader,
-                     wait: new_wait,
-                     prod_wait: new_pwait,
-                 }))
-        }
-    }
-
-    /// Identical to InnerRecv::unsubscribe()
-    pub fn unsubscribe(self) -> bool {
-        self.reader.reader.get_consumers() == 1
-    }
-}
-
-/// This struct acts as a UniInnerRecv except operating as a futures Stream on incoming data
-///
-/// Since this operates in an iterator-like manner on the data stream, it holds the function
-/// it calls and to use a different function must transform itself into a different
-/// FutInnerUniRecv using transform_operation
-impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> FutInnerUniRecv<RW, R, F, T> {
-    /// Identical to UniInnerRecv::try_recv, uses operation held by FutInnerUniRecv
-    #[inline(always)]
-    pub fn try_recv(&mut self) -> Result<R, TryRecvError> {
-        let opref = &mut self.op;
-        let rval = self.reader.try_recv_view(|tr| opref(tr));
-        self.prod_wait.notify_all();
-        rval.map_err(|x| x.1)
-    }
-
-    /// Identical to UniInnerRecv::recv, uses operation held by FutInnerUniRecv
-    #[inline(always)]
-    pub fn recv(&mut self) -> Result<R, RecvError> {
-        let opref = &mut self.op;
-        let rval = self.reader.recv_view(|tr| opref(tr));
-        self.prod_wait.notify_all();
-        rval.map_err(|x| x.1)
-    }
-
-    /// Adds another stream to the queue with a FutInnerUniRecv using the passed function
-    pub fn add_stream_with<Q, FQ: FnMut(&T) -> Q>(&self, op: FQ) -> FutInnerUniRecv<RW, Q, FQ, T> {
-        let rx = self.reader.add_stream();
-        FutInnerUniRecv {
-            reader: rx,
-            wait: self.wait.clone(),
-            prod_wait: self.prod_wait.clone(),
-            op: op,
-        }
-    }
-
-    /// Identical to InnerRecv::unsubscribe()
-    pub fn unsubscribe(self) -> bool {
-        self.reader.reader.get_consumers() == 1
-    }
-
-    pub fn into_multi(self) -> FutInnerRecv<RW, T> {
-        let new_reader = self.reader.add_stream();
-        FutInnerRecv {
-            reader: new_reader,
-            wait: self.wait.clone(),
-            prod_wait: self.prod_wait.clone(),
-        }
-    }
-}
-
-//////// Fut stream/sink implementations
 
 // The mpsc SendError struct can't be constructed according to rustc
 // since it's a struct and the ctor is private. Copied and pasted here
@@ -768,198 +615,6 @@ impl<T> SendError<T> {
     }
 }
 
-impl<RW: QueueRW<T>, T> Sink for FutInnerSend<RW, T> {
-    type SinkItem = T;
-    type SinkError = SendError<T>;
-
-    /// Essentially try_send except parks if the queue is full
-    fn start_send(&mut self, msg: T) -> StartSend<T, SendError<T>> {
-
-        match self.prod_wait.send_or_park(|m| self.writer.try_send(m), msg) {
-            Ok(_) => {
-                // see InnerSend::try_recv for why this isn't in the queue
-                if self.writer.queue.needs_notify {
-                    self.writer
-                        .queue
-                        .waiter
-                        .notify();
-                }
-                Ok(AsyncSink::Ready)
-            }
-            Err(TrySendError::Full(msg)) => Ok(AsyncSink::NotReady(msg)),
-            Err(TrySendError::Disconnected(msg)) => Err(SendError(msg)),
-        }
-    }
-
-    #[inline(always)]
-    fn poll_complete(&mut self) -> Poll<(), SendError<T>> {
-        Ok(Async::Ready(()))
-    }
-}
-
-impl<RW: QueueRW<T>, T> Stream for FutInnerRecv<RW, T> {
-    type Item = T;
-    type Error = ();
-
-    /// Essentially the same as recv
-    #[inline]
-    fn poll(&mut self) -> Poll<Option<T>, ()> {
-        self.reader.examine_signals();
-        loop {
-            match self.reader.queue.try_recv(&self.reader.reader) {
-                Ok(msg) => {
-                    self.prod_wait.notify_all();
-                    return Ok(Async::Ready(Some(msg)));
-                }
-                Err((_, TryRecvError::Disconnected)) => return Ok(Async::Ready(None)),
-                Err((pt, _)) => {
-                    let count = self.reader.reader.load_count(Relaxed);
-                    if unsafe { self.wait.fut_wait(count, &*pt, &self.reader.queue.writers) } {
-                        return Ok(Async::NotReady);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Stream for FutInnerUniRecv<RW, R, F, T> {
-    type Item = R;
-    type Error = ();
-
-    #[inline]
-    fn poll(&mut self) -> Poll<Option<R>, ()> {
-        self.reader.examine_signals();
-        loop {
-            let opref = &mut self.op;
-            match self.reader.queue.try_recv_view(opref, &self.reader.reader) {
-                Ok(msg) => {
-                    self.prod_wait.notify_all();
-                    return Ok(Async::Ready(Some(msg)));
-                }
-                Err((_, _, TryRecvError::Disconnected)) => return Ok(Async::Ready(None)),
-                Err((_, pt, _)) => {
-                    let count = self.reader.reader.load_count(Relaxed);
-                    if unsafe { self.wait.fut_wait(count, &*pt, &self.reader.queue.writers) } {
-                        return Ok(Async::NotReady);
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-//////// FutWait
-
-impl FutWait {
-    pub fn new() -> FutWait {
-        FutWait::with_spins(DEFAULT_TRY_SPINS, DEFAULT_YIELD_SPINS)
-    }
-
-    pub fn with_spins(spins_first: usize, spins_yield: usize) -> FutWait {
-        FutWait {
-            spins_first: spins_first,
-            spins_yield: spins_yield,
-            parked: parking_lot::Mutex::new(VecDeque::new()),
-        }
-    }
-
-    pub fn fut_wait(&self, seq: usize, at: &AtomicUsize, wc: &AtomicUsize) -> bool {
-        self.spin(seq, at, wc) && self.park(seq, at, wc)
-    }
-
-    pub fn spin(&self, seq: usize, at: &AtomicUsize, wc: &AtomicUsize) -> bool {
-        for _ in 0..self.spins_first {
-            if check(seq, at, wc) {
-                return false;
-            }
-        }
-
-        for _ in 0..self.spins_yield {
-            yield_now();
-            if check(seq, at, wc) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    pub fn park(&self, seq: usize, at: &AtomicUsize, wc: &AtomicUsize) -> bool {
-        let mut parked = self.parked.lock();
-        if check(seq, at, wc) {
-            return false;
-        }
-        parked.push_back(current());
-        return true;
-    }
-
-    fn send_or_park<T, F: Fn(T) -> Result<(), TrySendError<T>>>(&self,
-                                                                f: F,
-                                                                mut val: T)
-                                                                -> Result<(), TrySendError<T>> {
-        for _ in 0..self.spins_first {
-            match f(val) {
-                Err(TrySendError::Full(v)) => val = v,
-                v => return v,
-            }
-        }
-
-        for _ in 0..self.spins_yield {
-            yield_now();
-            match f(val) {
-                Err(TrySendError::Full(v)) => val = v,
-                v => return v,
-            }
-        }
-
-        let mut parked = self.parked.lock();
-        match f(val) {
-            Err(TrySendError::Full(v)) => {
-                parked.push_back(current());
-                return Err(TrySendError::Full(v));
-            }
-            v => return v,
-        }
-    }
-
-    fn notify_all(&self) {
-        let mut parked = self.parked.lock();
-        for val in parked.drain(..) {
-            val.notify();
-        }
-    }
-}
-
-impl Wait for FutWait {
-    #[cold]
-    fn wait(&self, _seq: usize, _w_pos: &AtomicUsize, _wc: &AtomicUsize) {
-        assert!(false, "Somehow normal wait got called in futures queue");
-    }
-
-    fn notify(&self) {
-        let mut parked = self.parked.lock();
-        if parked.len() > 0 {
-            if parked.len() > 8 {
-                for val in parked.drain(..) {
-                    val.notify();
-                }
-            } else {
-                let mut inline_v = smallvec::SmallVec::<[Task; 9]>::new();
-                inline_v.extend(parked.drain(..));
-                drop(parked);
-                for val in inline_v.drain() {
-                    val.notify();
-                }
-            }
-        }
-    }
-
-    fn needs_notify(&self) -> bool {
-        true
-    }
-}
-
 //////// Clone implementations
 
 impl<RW: QueueRW<T>, T> Clone for InnerSend<RW, T> {
@@ -984,32 +639,6 @@ impl<RW: QueueRW<T>, T> Clone for InnerRecv<RW, T> {
             token: self.queue.manager.get_token(),
             alive: true,
         }
-    }
-}
-
-impl<RW: QueueRW<T>, T> Clone for FutInnerSend<RW, T> {
-    fn clone(&self) -> FutInnerSend<RW, T> {
-        FutInnerSend {
-            writer: self.writer.clone(),
-            wait: self.wait.clone(),
-            prod_wait: self.prod_wait.clone(),
-        }
-    }
-}
-
-impl<RW: QueueRW<T>, T> Clone for FutInnerRecv<RW, T> {
-    fn clone(&self) -> FutInnerRecv<RW, T> {
-        FutInnerRecv {
-            reader: self.reader.clone(),
-            wait: self.wait.clone(),
-            prod_wait: self.prod_wait.clone(),
-        }
-    }
-}
-
-impl Clone for FutWait {
-    fn clone(&self) -> FutWait {
-        FutWait::with_spins(self.spins_first, self.spins_yield)
     }
 }
 
@@ -1058,21 +687,6 @@ impl<RW: QueueRW<T>, T> Drop for MultiQueue<RW, T> {
         }
     }
 }
-
-impl<RW: QueueRW<T>, T> Drop for FutInnerRecv<RW, T> {
-    fn drop(&mut self) {
-        let prod_wait = self.prod_wait.clone();
-        unsafe { self.reader.do_unsubscribe_with(|| { prod_wait.notify(); }) }
-    }
-}
-
-impl<RW: QueueRW<T>, R, F: for<'r> FnMut(&T) -> R, T> Drop for FutInnerUniRecv<RW, R, F, T> {
-    fn drop(&mut self) {
-        let prod_wait = self.prod_wait.clone();
-        unsafe { self.reader.do_unsubscribe_with(|| { prod_wait.notify(); }) }
-    }
-}
-
 impl<RW: QueueRW<T>, T> fmt::Debug for InnerRecv<RW, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f,
@@ -1080,36 +694,8 @@ impl<RW: QueueRW<T>, T> fmt::Debug for InnerRecv<RW, T> {
     }
 }
 
-impl<RW: QueueRW<T>, T> fmt::Debug for FutInnerRecv<RW, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,
-               "MultiQueue error message - you probably tried to unwrap the result of into_single")
-    }
-}
 
 unsafe impl<RW: QueueRW<T>, T> Sync for MultiQueue<RW, T> {}
 unsafe impl<RW: QueueRW<T>, T> Send for MultiQueue<RW, T> {}
 unsafe impl<RW: QueueRW<T>, T> Send for InnerSend<RW, T> {}
 unsafe impl<RW: QueueRW<T>, T> Send for InnerRecv<RW, T> {}
-unsafe impl<RW: QueueRW<T>, T> Send for FutInnerSend<RW, T> {}
-unsafe impl<RW: QueueRW<T>, T> Send for FutInnerRecv<RW, T> {}
-unsafe impl<RW: QueueRW<T>, R, F: FnMut(&T) -> R, T> Send for FutInnerUniRecv<RW, R, F, T> {}
-
-pub fn futures_multiqueue<RW: QueueRW<T>, T>(capacity: Index)
-                                             -> (FutInnerSend<RW, T>, FutInnerRecv<RW, T>) {
-    let cons_arc = Arc::new(FutWait::new());
-    let prod_arc = Arc::new(FutWait::new());
-    let (tx, rx) = MultiQueue::new_internal(capacity, cons_arc.clone());
-    let ftx = FutInnerSend {
-        writer: tx,
-        wait: cons_arc.clone(),
-        prod_wait: prod_arc.clone(),
-    };
-    let rtx = FutInnerRecv {
-        reader: rx,
-        wait: cons_arc.clone(),
-        prod_wait: prod_arc.clone(),
-    };
-    (ftx, rtx)
-}
-
