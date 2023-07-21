@@ -12,8 +12,7 @@ categories = ['asynchronous', 'concurrency', 'data-structures', 'algorithms']
 
 
 [dependencies]
-crossbeam = "*"
-smallvec = "*"
 parking_lot = "*"
+smallvec = "*"
 time = "*"
 atomic_utilities = "*"
