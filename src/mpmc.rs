@@ -1,5 +1,5 @@
 use countedindex::Index;
-use multiqueue::{InnerSend, InnerRecv, MPMC, MultiQueue, SendError};
+use multiqueue::{InnerSend, InnerRecv, MPMC, MultiQueue};
 use wait::Wait;
 
 use std::sync::mpsc::{TrySendError, TryRecvError, RecvError};

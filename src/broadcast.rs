@@ -1,6 +1,6 @@
 use countedindex::Index;
 use multiqueue::{InnerSend, InnerRecv, BCast,
-                 MultiQueue, SendError};
+                 MultiQueue};
 use overwriting_queue::{OverwritingInnerSend, OverwritingInnerRecv, OverwritingQueue};
 use wait::Wait;
 
