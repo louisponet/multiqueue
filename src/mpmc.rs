@@ -579,13 +579,10 @@ mod test {
 
     use super::mpmc_queue;
 
-    extern crate crossbeam;
-    use self::crossbeam::scope;
-
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
     use std::sync::mpsc::TryRecvError;
-    use std::thread::yield_now;
+    use std::thread::{yield_now, scope};
 
     #[test]
     fn build_queue() {

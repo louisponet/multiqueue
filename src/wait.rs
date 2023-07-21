@@ -217,13 +217,10 @@ impl Clone for BlockingWait {
 mod test {
 
     use std::sync::atomic::{AtomicUsize, fence, Ordering};
-    use std::thread::yield_now;
+    use std::thread::{yield_now, scope};
 
     use super::*;
     use broadcast::broadcast_queue_with;
-
-    extern crate crossbeam;
-    use self::crossbeam::scope;
 
     #[inline(never)]
     fn waste_some_us(n_us: usize, to: &AtomicUsize) {

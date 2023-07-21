@@ -187,10 +187,8 @@ unsafe impl Sync for CountedIndex {}
 mod tests {
     use super::*;
 
-    extern crate crossbeam;
-    use self::crossbeam::scope;
-
     use std::sync::atomic::Ordering::*;
+    use std::thread::scope;
 
     fn test_incr_param(wrap_size: Index, goaround: usize) {
         let mycounted = CountedIndex::new(wrap_size);
