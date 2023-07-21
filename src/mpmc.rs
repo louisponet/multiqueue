@@ -609,7 +609,7 @@ mod test {
         scope(|scope| {
             for q in 0..senders {
                 let cur_writer = writer.clone();
-                scope.spawn(move |_| {
+                scope.spawn(move || {
                     bref.wait();
                     'outer: for i in 0..num_loop {
                         for _ in 0..100000000 {
@@ -623,7 +623,7 @@ mod test {
                 });
             }
             writer.unsubscribe();
-            scope.spawn(move |_| {
+            scope.spawn(move || {
                 let mut myv = Vec::new();
                 for _ in 0..senders {
                     myv.push(0);
@@ -669,7 +669,7 @@ mod test {
         scope(|scope| {
             for _ in 0..senders {
                 let cur_writer = writer.clone();
-                scope.spawn(move |_| {
+                scope.spawn(move || {
                     bref.wait();
                     'outer: for _ in 0..num_loop {
                         for _ in 0..100000000 {
@@ -685,7 +685,7 @@ mod test {
             writer.unsubscribe();
             for _ in 0..receivers {
                 let this_reader = reader.clone();
-                scope.spawn(move |_| {
+                scope.spawn(move || {
                     bref.wait();
                     loop {
                         match this_reader.try_recv() {
